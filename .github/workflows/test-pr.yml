@@ -1,4 +1,4 @@
-name: Build Linux Release
+name: Build Test Packages
 
 on:
   pull_request:
@@ -6,146 +6,17 @@ on:
       - develop
 
 jobs:
-  build-linux:
+  prepare-version:
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-      id-token: write
-
-    strategy:
-      matrix:
-        arch: [x86_64, aarch64]
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Strip the version
+        id: strip_version
+        run: echo "version=PR-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+    outputs:
+      version: ${{ steps.strip_version.outputs.version }}
 
-      - name: Set up QEMU (for ARM emulation)
-        if: matrix.arch == 'aarch64'
-        uses: docker/setup-qemu-action@v2
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: 22
-
-      - name: Install Node.js dependencies
-        run: npm ci
-
-      - name: Install Electron system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2t64
-
-      - name: Ensure dist folder exists
-        run: mkdir -p dist
-
-      - name: Build Linux for ${{ matrix.arch }} package
-        run: |
-          if [[ "${{ matrix.arch }}" == "x86_64" ]]; then
-            npx electron-builder --linux --x64 --dir
-          elif [[ "${{ matrix.arch }}" == "aarch64" ]]; then
-            npx electron-builder --linux --arm64 --dir
-          else
-            echo "Unknown architecture: ${{ matrix.arch }}"
-            exit 1
-          fi
-
-      - name: Prepare pkg directory, media files, gamelist, padtokey file and launcher script
-        id: prepare_package
-        run: |
-          set -e
-          VERSION="PR-${GITHUB_SHA::7}"
-
-          PKGREL="1"
-          VERSION_WITH_REL="${VERSION}-${PKGREL}"
-
-          if [[ "${{ matrix.arch }}" == "x86_64" ]]; then
-            SOURCE_UNPACKED_DIR="linux-unpacked"
-            PKG_ARCH="x86_64"
-          else
-            SOURCE_UNPACKED_DIR="linux-arm64-unpacked"
-            PKG_ARCH="aarch64"
-          fi
-
-          PKG_ROOT="batocera-pkg"
-          rm -rf "$PKG_ROOT"
-          mkdir -p "$PKG_ROOT"
-
-          PORTS_DIR="$PKG_ROOT/userdata/roms/ports"
-          GAME_DIR="$PORTS_DIR/batocode-arcade"
-          mkdir -p "$GAME_DIR"
-          mkdir -p "$PORTS_DIR/images"
-          mkdir -p "$PORTS_DIR/videos"
-
-          shopt -s dotglob
-          mv "dist/$SOURCE_UNPACKED_DIR"/* "$GAME_DIR/"
-          shopt -u dotglob
-          rmdir "dist/$SOURCE_UNPACKED_DIR"
-
-          cp pkgbuild/batocode-arcade.sh "$PKG_ROOT/userdata/roms/ports/batocode-arcade.sh"
-          chmod +x "$PKG_ROOT/userdata/roms/ports/batocode-arcade.sh"
-          cp pkgbuild/batocode-arcade.sh.keys "$PKG_ROOT/userdata/roms/ports/batocode-arcade.sh.keys"
-          cp pkgbuild/images/batocode-arcade-fanart.png "$PORTS_DIR/images/" || true
-          cp pkgbuild/images/batocode-arcade-image.png "$PORTS_DIR/images/" || true
-          cp pkgbuild/images/batocode-arcade-thumb.png "$PORTS_DIR/images/" || true
-          cp pkgbuild/images/batocode-arcade-marquee.png "$PORTS_DIR/images/" || true
-          cp pkgbuild/videos/batocode-arcade-video.mp4 "$PORTS_DIR/videos/" || true
-          cp pkgbuild/.BATOEXEC "$PKG_ROOT/.BATOEXEC"
-
-
-          cat <<PKGINFO > "$PKG_ROOT/.PKGINFO"
-          pkgname = ports-batocode-arcade
-          pkgver = $VERSION_WITH_REL
-          pkgdesc = A makecode arcade kiosk wrapper to run own created games inside Batocera
-          arch = $PKG_ARCH
-          group = sys-ports
-          packager = RAM Raiders
-          url = https://github.com/RAMRaiders/batocode-arcade
-
-          PKGINFO
-
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "version_with_rel=$VERSION_WITH_REL" >> $GITHUB_OUTPUT
-          echo "pkg_arch=$PKG_ARCH" >> $GITHUB_OUTPUT
-          echo "pkg_root=$PKG_ROOT" >> $GITHUB_OUTPUT
-
-      - name: Create Batocera Pacman Package with batocera-makepkg script
-        id: create_pacman_pkg
-        run: |
-          set -e
-          PKG_ROOT="${{ steps.prepare_package.outputs.pkg_root }}"
-          chmod +x pkgbuild/scripts/batocera-makepkg.sh
-
-          pushd "$PKG_ROOT"
-          bash "../pkgbuild/scripts/batocera-makepkg.sh"
-          popd
-
-          # Package is created one level up from $PKG_ROOT
-          PKG_FILE=$(ls -1 ports-batocode-arcade-*.pkg.tar.zst | head -n1)
-
-          if [[ ! -f "$PKG_FILE" ]]; then
-            echo "ERROR: Package not created!"
-            exit 1
-          fi
-
-          mkdir -p pacman-repo
-          cp "$PKG_FILE" pacman-repo/
-          echo "pkg_file=$PWD/$PKG_FILE" >> $GITHUB_OUTPUT
-
-      - name: Package Linux build tarball
-        run: |
-          VERSION_WITH_REL="${{ steps.prepare_package.outputs.version_with_rel }}"
-          PKG_ARCH="${{ steps.prepare_package.outputs.pkg_arch }}"
-          tar -czvf "batocode-arcade-${VERSION_WITH_REL}-${PKG_ARCH}.tar.gz" \
-            -C "${{ steps.prepare_package.outputs.pkg_root }}/userdata/roms/ports/batocode-arcade" .
-
-      - name: Upload Linux build tarball for ${{ matrix.arch }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-${{ matrix.arch }}.tar.gz
-          path: batocode-arcade-*.tar.gz
-
-      - name: Upload .zst Pacman package for ${{ matrix.arch }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: pacman-pkg-${{ matrix.arch }}.pkg.tar.zst
-          path: pacman-repo/*.pkg.tar.zst
+  build-linux:
+    needs: prepare-version
+    uses: ./.github/workflows/build-linux.yml
+    with:
+      version: ${{ needs.prepare-version.outputs.version }}

@@ -1,0 +1,79 @@
+name: Prepare Batocera Package
+description: Prepares a Batocera-compatible package structure
+inputs:
+  arch:
+    required: true
+  version:
+    required: true
+outputs:
+  pkg_root:
+    description: "Path to the package root"
+    value: ${{ steps.prepare.outputs.pkg_root }}
+  pkg_arch:
+    description: "Arch name for the package"
+    value: ${{ steps.prepare.outputs.pkg_arch }}
+  version_with_rel:
+    description: "Version with release tag"
+    value: ${{ steps.prepare.outputs.version_with_rel }}
+runs:
+  using: "composite"
+  steps:
+    - id: prepare
+      run: |
+        set -e
+        VERSION="${{ inputs.version }}"
+        PKGREL="1"
+        VERSION_WITH_REL="${VERSION}-${PKGREL}"
+
+        if [[ "${{ inputs.arch }}" == "x86_64" ]]; then
+          SOURCE_UNPACKED_DIR="linux-unpacked"
+          PKG_ARCH="x86_64"
+        else
+          SOURCE_UNPACKED_DIR="linux-arm64-unpacked"
+          PKG_ARCH="aarch64"
+        fi
+
+        PKG_ROOT="batocera-pkg"
+        rm -rf "$PKG_ROOT"
+        mkdir -p "$PKG_ROOT"
+
+        PORTS_DIR="$PKG_ROOT/userdata/roms/ports"
+        GAME_DIR="$PORTS_DIR/batocode-arcade"
+        mkdir -p "$GAME_DIR" "$PORTS_DIR/images" "$PORTS_DIR/videos"
+
+        LOCALES_DIR="dist/$SOURCE_UNPACKED_DIR/locales"
+
+        if [ -d "$LOCALES_DIR" ]; then
+          echo "Removing all language .pak files except en-US"
+          find "$LOCALES_DIR" -type f -name "*.pak" ! -name "en-US.pak" -exec rm -v {} \;
+        fi
+
+        shopt -s dotglob
+        mv "dist/$SOURCE_UNPACKED_DIR"/* "$GAME_DIR/"
+        shopt -u dotglob
+        rmdir "dist/$SOURCE_UNPACKED_DIR"
+
+        cp pkgbuild/batocode-arcade.sh "$PORTS_DIR/batocode-arcade.sh"
+        chmod +x "$PORTS_DIR/batocode-arcade.sh"
+        cp pkgbuild/batocode-arcade.sh.keys "$PORTS_DIR/batocode-arcade.sh.keys"
+
+        cp pkgbuild/images/*.png "$PORTS_DIR/images/" || true
+        cp pkgbuild/videos/*.mp4 "$PORTS_DIR/videos/" || true
+        cp pkgbuild/.BATOEXEC "$PKG_ROOT/.BATOEXEC"
+
+        cat <<PKGINFO > "$PKG_ROOT/.PKGINFO"
+        pkgname = ports-batocode-arcade
+        pkgver = $VERSION_WITH_REL
+        pkgdesc = A Makecode Arcade kiosk client
+        arch = $PKG_ARCH
+        group = sys-ports
+        packager = RAM Raiders
+        url = https://github.com/RAMRaiders/batocode-arcade
+        PKGINFO
+
+        chmod -R 0775 "$PKG_ROOT"
+
+        echo "version_with_rel=$VERSION_WITH_REL" >> $GITHUB_OUTPUT
+        echo "pkg_arch=$PKG_ARCH" >> $GITHUB_OUTPUT
+        echo "pkg_root=$PKG_ROOT" >> $GITHUB_OUTPUT
+      shell: bash

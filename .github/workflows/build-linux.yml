@@ -1,0 +1,105 @@
+name: Build App in Linux
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up QEMU (for ARM emulation)
+        if: matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 22
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Install Electron system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libx11-xcb1 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2t64
+
+      - name: Ensure dist folder exists
+        run: mkdir -p dist
+
+      - name: Build Linux ${{ matrix.arch }} package (unpacked)
+        run: |
+          if [[ "${{ matrix.arch }}" == "x86_64" ]]; then
+            npx electron-builder --linux --x64 --dir
+          elif [[ "${{ matrix.arch }}" == "aarch64" ]]; then
+            npx electron-builder --linux --arm64 --dir
+          else
+            echo "Unknown architecture: ${{ matrix.arch }}"
+            exit 1
+          fi
+
+      - name: Run prepare-pkg
+        id: prepare_package
+        uses: ./.github/actions/prepare-pkg
+        with:
+          arch: ${{ matrix.arch }}
+          version: ${{ inputs.version }}
+
+      - name: Create Batocera Pacman Package using batocera-makepkg
+        id: create_pacman_pkg
+        run: |
+          set -e
+          PKG_ROOT="${{ steps.prepare_package.outputs.pkg_root }}"
+          chmod +x pkgbuild/scripts/batocera-makepkg.sh
+
+          pushd "$PKG_ROOT"
+          bash "../pkgbuild/scripts/batocera-makepkg.sh"
+          popd
+
+          # Package is created one level up from $PKG_ROOT
+          PKG_FILE=$(find .. -maxdepth 1 -name "ports-batocode-arcade-*.pkg.tar.zst" | head -n1)
+
+          if [[ ! -f "$PKG_FILE" ]]; then
+            echo "ERROR: Package not created!"
+            exit 1
+          fi
+
+          mkdir -p pacman-repo
+          cp "$PKG_FILE" pacman-repo/
+          echo "pkg_file=$PWD/$PKG_FILE" >> $GITHUB_OUTPUT
+
+      - name: Package Linux release tarball
+        id: package_tarball
+        run: |
+          VERSION_WITH_REL="${{ steps.prepare_package.outputs.version_with_rel }}"
+          PKG_ARCH="${{ steps.prepare_package.outputs.pkg_arch }}"
+          OUTPUT_FILE="batocode-arcade-${PKG_ARCH}-${VERSION_WITH_REL}.tar.gz"
+          tar -czvf "$OUTPUT_FILE" \
+            -C "${{ steps.prepare_package.outputs.pkg_root }}/userdata/roms/ports/batocode-arcade" .
+          echo "tarball_path=$PWD/$OUTPUT_FILE" >> $GITHUB_OUTPUT
+
+      - name: Upload Linux release tarball for ${{ matrix.arch }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-tarball-${{ matrix.arch }}
+          path: ${{ steps.package_tarball.outputs.tarball_path }}
+
+      - name: Upload pacman repo artifacts for this arch
+        uses: actions/upload-artifact@v4
+        with:
+          name: pacman-pkg-${{ matrix.arch }}
+          path: pacman-repo/*
